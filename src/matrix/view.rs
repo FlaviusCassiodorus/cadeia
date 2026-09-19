@@ -1,3 +1,4 @@
+use super::matmul;
 use super::{DefaultElement, Element};
 use std::ops::Range;
 
@@ -119,7 +120,6 @@ pub trait MatrixViewRead {
     }
 }
 
-// TODO: Add tests for mixed layouts.
 // Test operations between row-major and column-major matrix views.
 
 pub trait MatrixViewWrite: MatrixViewRead {
@@ -128,6 +128,15 @@ pub trait MatrixViewWrite: MatrixViewRead {
         assert!(self._check_idx(i, j));
         let idx = self._idx(i, j);
         self.data_mut().get_mut(idx).unwrap()
+    }
+
+    fn fill_with(&mut self, mut f: impl FnMut() -> Self::K) {
+        let (rows, cols) = self.layout().shape();
+        for i in 0..rows {
+            for j in 0..cols {
+                *self.get_mut(i, j) = f();
+            }
+        }
     }
 
     fn add_assign(&mut self, other: &impl MatrixViewRead<K = <Self>::K>) {
@@ -148,6 +157,15 @@ pub trait MatrixViewWrite: MatrixViewRead {
                 }
             }
         }
+    }
+
+    fn matmul_assign(
+        &mut self,
+        a: &impl MatrixViewRead<K = <Self>::K>,
+        b: &impl MatrixViewRead<K = <Self>::K>,
+    ) {
+        // matmul::matmul_naive_ijk(self, a, b);
+        matmul::matmul_optimized_loop_order(self, a, b);
     }
 }
 
@@ -437,6 +455,29 @@ mod tests {
         }
 
         assert_eq!(data, [0, 0, 99, 0, 0]);
+    }
+
+    #[test]
+    fn fill_with_writes_values_in_logical_order() {
+        let mut data = [0, 0, 99, 0, 0];
+        let layout = MatrixLayout {
+            rows: 2,
+            cols: 2,
+            row_stride: 3,
+            col_stride: 1,
+        };
+        let mut next = 1;
+
+        {
+            let mut view = MatrixViewMut::new(&mut data, layout);
+            view.fill_with(|| {
+                let value = next;
+                next += 1;
+                value
+            });
+        }
+
+        assert_eq!(data, [1, 2, 99, 3, 4]);
     }
 
     #[test]

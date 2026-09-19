@@ -3,6 +3,7 @@ mod owned;
 mod view;
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Sub, SubAssign};
 
+pub mod matmul;
 pub use owned::MatrixOwned;
 pub use view::{MatrixLayout, MatrixView, MatrixViewMut, MatrixViewRead, MatrixViewWrite};
 pub type DefaultElement = f64;
