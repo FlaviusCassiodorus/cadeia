@@ -69,6 +69,10 @@ pub trait MatrixViewRead {
     fn data(&self) -> &[Self::K];
 
     #[inline]
+    fn size(&self) -> usize {
+        self.layout().rows() * self.layout().cols
+    }
+    #[inline]
     fn same_shape<M>(&self, other: &M) -> bool
     where
         M: MatrixViewRead<K = Self::K>,
@@ -118,6 +122,20 @@ pub trait MatrixViewRead {
             && (0..self.layout().rows)
                 .all(|i| (0..self.layout().cols).all(|j| self.at(i, j) == other.at(i, j)))
     }
+
+    fn sum_with<M>(&self, other: &M, f: impl Fn(Self::K, Self::K) -> Self::K) -> Self::K
+    where
+        M: MatrixViewRead<K = Self::K>,
+    {
+        assert!(self.same_shape(other), "Shape mismatch");
+        let mut sum = Self::K::zero();
+        for i in 0..self.layout().rows {
+            for j in 0..self.layout().cols {
+                sum += f(self.at(i, j), other.at(i, j));
+            }
+        }
+        sum
+    }
 }
 
 // Test operations between row-major and column-major matrix views.
@@ -159,6 +177,66 @@ pub trait MatrixViewWrite: MatrixViewRead {
         }
     }
 
+    fn add_assign_scaled(&mut self, other: &impl MatrixViewRead<K = <Self>::K>, scale: Self::K) {
+        assert!(self.same_shape(other), "Shape mismatch");
+        let layout = other.layout();
+        let is_row_major_iter = self._prefer_row_major_iteration(other);
+        // Inner loop on the more packed data
+        if is_row_major_iter {
+            for i in 0..layout.rows {
+                for j in 0..layout.cols {
+                    *self.get_mut(i, j) += scale * other.at(i, j);
+                }
+            }
+        } else {
+            for j in 0..layout.cols {
+                for i in 0..layout.rows {
+                    *self.get_mut(i, j) += scale * other.at(i, j);
+                }
+            }
+        }
+    }
+
+    fn sub_assign(&mut self, other: &impl MatrixViewRead<K = <Self>::K>) {
+        assert!(self.same_shape(other), "Shape mismatch");
+        let layout = other.layout();
+        let is_row_major_iter = self._prefer_row_major_iteration(other);
+        // Inner loop on the more packed data
+        if is_row_major_iter {
+            for i in 0..layout.rows {
+                for j in 0..layout.cols {
+                    *self.get_mut(i, j) -= other.at(i, j);
+                }
+            }
+        } else {
+            for j in 0..layout.cols {
+                for i in 0..layout.rows {
+                    *self.get_mut(i, j) -= other.at(i, j);
+                }
+            }
+        }
+    }
+
+    fn sub_assign_scaled(&mut self, other: &impl MatrixViewRead<K = <Self>::K>, scale: Self::K) {
+        assert!(self.same_shape(other), "Shape mismatch");
+        let layout = other.layout();
+        let is_row_major_iter = self._prefer_row_major_iteration(other);
+        // Inner loop on the more packed data
+        if is_row_major_iter {
+            for i in 0..layout.rows {
+                for j in 0..layout.cols {
+                    *self.get_mut(i, j) -= scale * other.at(i, j);
+                }
+            }
+        } else {
+            for j in 0..layout.cols {
+                for i in 0..layout.rows {
+                    *self.get_mut(i, j) -= scale * other.at(i, j);
+                }
+            }
+        }
+    }
+
     fn matmul_assign(
         &mut self,
         a: &impl MatrixViewRead<K = <Self>::K>,
@@ -166,6 +244,53 @@ pub trait MatrixViewWrite: MatrixViewRead {
     ) {
         // matmul::matmul_naive_ijk(self, a, b);
         matmul::matmul_optimized_loop_order(self, a, b);
+    }
+    fn assign_with(
+        &mut self,
+        a: &impl MatrixViewRead<K = <Self>::K>,
+        b: &impl MatrixViewRead<K = <Self>::K>,
+        f: impl Fn(Self::K, Self::K) -> Self::K,
+    ) {
+        let (rows, cols) = self.layout().shape();
+        for i in 0..rows {
+            for j in 0..cols {
+                *self.get_mut(i, j) = f(a.at(i, j), b.at(i, j))
+            }
+        }
+    }
+}
+
+/// Adds `input` into `out`, broadcasting dimensions of `input` with size one.
+///
+/// Each dimension of `input` must either match `out` or have size one. Values
+/// in singleton dimensions are reused across the corresponding dimension of `out`.
+pub fn add_broadcast_assign<K: Element>(out: &mut MatrixViewMut<'_, K>, input: &MatrixView<'_, K>) {
+    assert!(input.layout().rows() == 1 || input.layout().rows() == out.layout().rows());
+    assert!(input.layout().cols() == 1 || input.layout().cols() == out.layout().cols());
+    for i in 0..out.layout().rows() {
+        for j in 0..out.layout().cols() {
+            *out.get_mut(i, j) += input.at(
+                if input.layout().rows() == 1 { 0 } else { i },
+                if input.layout().cols() == 1 { 0 } else { j },
+            );
+        }
+    }
+}
+
+/// Adds `input` into `out`, summing over dimensions where `out` has size one.
+///
+/// Each dimension of `out` must either match `input` or have size one. This
+/// accumulates all values from `input` that map to the same position in `out`.
+pub fn sum_broadcast_assign<K: Element>(out: &mut MatrixViewMut<'_, K>, input: &MatrixView<'_, K>) {
+    assert!(out.layout().rows() == 1 || out.layout().rows() == input.layout().rows());
+    assert!(out.layout().cols() == 1 || out.layout().cols() == input.layout().cols());
+    for i in 0..input.layout().rows() {
+        for j in 0..input.layout().cols() {
+            *out.get_mut(
+                if out.layout().rows() == 1 { 0 } else { i },
+                if out.layout().cols() == 1 { 0 } else { j },
+            ) += input.at(i, j);
+        }
     }
 }
 
@@ -332,6 +457,19 @@ mod tests {
 
         assert_eq!(view.try_at(2, 0), None);
         assert_eq!(view.try_at(0, 3), None);
+    }
+
+    #[test]
+    fn test_sum_with() {
+        let lhs_data = [1.0, 2.0, 3.0, 4.0];
+        let rhs_data = [4.0, 3.0, 2.0, 1.0];
+        let layout = MatrixLayout::row_major(2, 2);
+        let lhs = MatrixView::new(&lhs_data, layout.clone());
+        let rhs = MatrixView::new(&rhs_data, layout);
+
+        let sum = lhs.sum_with(&rhs, |x, y| (x - y) * (x - y));
+
+        assert_eq!(sum, 20.0);
     }
 
     #[test]

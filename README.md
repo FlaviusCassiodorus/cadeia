@@ -9,9 +9,9 @@ I got some inspiration from [this YouTube video](https://youtu.be/hL_n_GljC0I?si
 The project is planned around four main components:
 
 - **Matrix** -- storage, views, layouts, and matrix operations (e.g., addition).
-- **Computational Graph** -- [TODO] building the computational graph (which can be a neural network).
-- **Fit** -- [TODO] executing the training loop against a dataset.
-- **Predict** -- [TODO] running the graph against (possibly new) input data.
+- **Computational Graph** -- building the computational graph (which can be a neural network).
+- **Fit** -- executing the training loop against a dataset.
+- **Predict** -- running the graph against (possibly new) input data.
 
 ## Running
 Once all components are ready, a convenient CLI tool will be made available.
