@@ -4,6 +4,10 @@ A simple autograd engine written from scratch in Rust.
 This project is for educational purposes, not a production-grade machine learning library.
 I got some inspiration from [this YouTube video](https://youtu.be/hL_n_GljC0I?si=S_J22T4WvQGWXOfO).
 
+## Naming
+
+The name `cadeia` comes from the fact that *regra em cadeia* means *chain rule* in Portuguese and the chain rule sits at the core of computational graphs.
+
 ## Main Components
 
 The project is planned around four main components:
