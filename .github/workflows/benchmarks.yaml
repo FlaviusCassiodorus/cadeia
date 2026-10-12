@@ -1,0 +1,33 @@
+# Run unit tests when we have a PR
+name: Benchmarks
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'src/matrix/view.rs'
+      - 'src/matrix/matmul.rs'
+      - 'benches/matmul_bench.rs'
+
+jobs:
+  benchmark:
+    name: Benchmarks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run benchmarks
+        run: cargo bench --bench matmul_bench
+
+      - name: Upload benchmark report
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-report
+          path: target/criterion/
+          retention-days: 30
