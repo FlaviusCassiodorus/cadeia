@@ -3,43 +3,8 @@ use std::collections::HashMap;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
 use cadeia::engine::{Data, Engine, FitCfg};
-use cadeia::graph::{Graph, NodeId};
+use cadeia::factory::LassoCfg;
 use cadeia::matrix::{MatrixOwned, MatrixViewRead, MatrixViewWrite};
-
-pub struct LassoCfg {
-    pub lambda: f64,
-    pub has_intercept: bool,
-    pub n_features: usize,
-}
-impl Default for LassoCfg {
-    fn default() -> Self {
-        Self {
-            lambda: 0.05,
-            has_intercept: true,
-            n_features: 3,
-        }
-    }
-}
-
-impl LassoCfg {
-    fn build(&self) -> (Graph, NodeId, NodeId, NodeId, NodeId) {
-        let mut graph = Graph::default();
-        let input = graph.add_input(cadeia::graph::Shape::batch_rows(self.n_features));
-        let weights = graph.add_param(cadeia::graph::Shape::fixed(self.n_features, 1));
-        let prediction = graph.add_op(cadeia::graph::Operation::MatMul(input, weights));
-        let prediction = if self.has_intercept {
-            let bias = graph.add_param(cadeia::graph::Shape::fixed(1, 1));
-            graph.add_op(cadeia::graph::Operation::Add(prediction, bias))
-        } else {
-            prediction
-        };
-        let target = graph.add_input(cadeia::graph::Shape::batch_rows(1));
-        let fit_loss = graph.add_op(cadeia::graph::Operation::LossL2(prediction, target));
-        let penalty = graph.add_op(cadeia::graph::Operation::L1(weights, self.lambda));
-        let cost = graph.add_op(cadeia::graph::Operation::Add(fit_loss, penalty));
-        (graph, input, target, prediction, cost)
-    }
-}
 
 const TRUE_WEIGHTS: [f64; 3] = [1.5, 0.0, -2.0];
 const TRUE_INTERCEPT: f64 = 0.75;
@@ -78,15 +43,15 @@ fn make_data(feature_scale: f64) -> (MatrixOwned<f64>, MatrixOwned<f64>) {
 
 fn main() {
     let cfg = LassoCfg::default();
-    let (graph, input_node, target_node, prediction_node, cost_node) = cfg.build();
-    let mut engine = Engine::new(graph, prediction_node, cost_node);
+    let model = cfg.build();
+    let mut engine = Engine::new(model.graph, model.prediction, model.cost);
     let mut rng = StdRng::seed_from_u64(7);
 
     // The generated rule uses features 0 and 2; feature 1 is irrelevant.
     let (training_input, training_target) = make_data(1.0);
     let mut training_inputs = HashMap::new();
-    training_inputs.insert(input_node, training_input.as_view());
-    training_inputs.insert(target_node, training_target.as_view());
+    training_inputs.insert(model.input, training_input.as_view());
+    training_inputs.insert(model.target, training_target.as_view());
     let training_data = Data::new(training_inputs);
     let (prediction_input, expected_target) = make_data(0.5);
 
@@ -108,7 +73,7 @@ fn main() {
             .as_view_mut()
             .get_mut(feature + 1, feature) = 1.0;
     }
-    let coefficient_data = Data::from_input(input_node, coefficient_input.as_view());
+    let coefficient_data = Data::from_input(model.input, coefficient_input.as_view());
     let coefficient_predictions = engine
         .predict(&coefficient_data)
         .expect("engine was fitted");
@@ -124,7 +89,7 @@ fn main() {
         format_coefficients(&learned_weights)
     );
 
-    let prediction_data = Data::from_input(input_node, prediction_input.as_view());
+    let prediction_data = Data::from_input(model.input, prediction_input.as_view());
     let prediction = engine.predict(&prediction_data).expect("engine was fitted");
     println!("Target rule: y = 0.75 + 1.5*x0 + 0.0*x1 - 2.0*x2 + small noise");
     println!("First four prediction rows:");

@@ -22,12 +22,14 @@ pub trait Element:
     + Div<Output = Self>
     + DivAssign
     + PartialEq
+    + PartialOrd
 {
     fn zero() -> Self;
     fn one() -> Self;
     fn abs(self) -> Self;
     fn from_usize(value: usize) -> Self;
     fn from_f64(value: f64) -> Self;
+    fn to_f64(self) -> f64;
 }
 macro_rules! impl_element_float {
     ($t:ty) => {
@@ -46,6 +48,9 @@ macro_rules! impl_element_float {
             }
             fn from_f64(value: f64) -> $t {
                 value as $t
+            }
+            fn to_f64(self) -> f64 {
+                self as f64
             }
         }
     };
@@ -68,6 +73,9 @@ macro_rules! impl_element_signed {
             fn from_f64(value: f64) -> $t {
                 value as $t
             }
+            fn to_f64(self) -> f64 {
+                self as f64
+            }
         }
     };
 }
@@ -88,6 +96,9 @@ macro_rules! impl_element_unsigned {
             }
             fn from_f64(value: f64) -> $t {
                 value as $t
+            }
+            fn to_f64(self) -> f64 {
+                self as f64
             }
         }
     };

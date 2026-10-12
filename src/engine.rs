@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::io::{self, Write};
 
 use crate::graph::{
     Graph, Node, NodeId, NodeStorage, NodeStorageGradView, NodeStorageParamView,
@@ -259,11 +260,13 @@ impl Engine {
     }
     pub fn fit(&mut self, input: &Data<'_>, cfg: FitCfg) {
         assert!(cfg.batch_size > 0, "batch size must be greater than zero");
+        let batch_size = cfg.batch_size as usize;
+        let batches_per_epoch = input.n / batch_size;
         let mut state = FitState::new(&self.graph, cfg.batch_size as usize);
         state.params_init(cfg.params_initializer);
         self.state = Some(state);
-        for _ in 0..cfg.n_epochs {
-            for (start, end) in batch_indices(input.n, cfg.batch_size as usize) {
+        for epoch in 0..cfg.n_epochs {
+            for (start, end) in batch_indices(input.n, batch_size) {
                 // Take only the data that corresponds to this batch
                 let batch = input.slice(start, end);
                 // Clear operations and gradients; initialize the cost gradient with 1
@@ -275,11 +278,29 @@ impl Engine {
                 }
                 // Perform the forward pass UP TO cost node -- fills operation buffers
                 self.forward_pass(&batch, self.node_cost);
+                let loss = self
+                    .state
+                    .as_ref()
+                    .unwrap()
+                    .get_val(self.node_cost)
+                    .at(0, 0);
+                print!(
+                    "\r\x1b[2Kepoch {}/{} batch {}/{} loss {:.6}",
+                    epoch + 1,
+                    cfg.n_epochs,
+                    start / batch_size + 1,
+                    batches_per_epoch,
+                    loss
+                );
+                io::stdout().flush().expect("failed to flush training progress");
                 // Perform the barckward pass FROM the cost node -- fills gradient buffers
                 self.backward_pass(self.node_cost);
                 // Change the params based on the gradients
                 self.apply_grad(cfg.learning_rate);
             }
+        }
+        if cfg.n_epochs > 0 && batches_per_epoch > 0 {
+            println!();
         }
     }
     pub fn predict(&mut self, input: &Data<'_>) -> Option<MatrixView<'_, f64>> {
@@ -352,7 +373,7 @@ mod tests {
         let matmul_id = graph.add_op(crate::graph::Operation::MatMul(input_id, weights_id));
         let bias_id = graph.add_input(crate::graph::Shape::batch_rows(2));
         let output_id = graph.add_op(crate::graph::Operation::Add(matmul_id, bias_id));
-        let cost_id = graph.add_op(crate::graph::Operation::L1(output_id, 0.0));
+        let cost_id = graph.add_op(crate::graph::Operation::NormL1(output_id, 0.0));
 
         let input = MatrixOwned::from_vec(vec![1.0, 2.0, 3.0, 4.0], 2, 2);
         let bias = MatrixOwned::from_vec(vec![0.5, -1.0, 1.5, 2.0], 2, 2);
@@ -384,5 +405,77 @@ mod tests {
         let actual = engine.predict(&data).expect("engine was fitted");
 
         assert!(expected.as_view().eq_matrix(&actual));
+    }
+
+    #[test]
+    fn relu_forward_and_backward_handle_zero() {
+        let mut graph = Graph::default();
+        let input = graph.add_input(crate::graph::Shape::fixed(1, 4));
+        let output = graph.add_op(crate::graph::Operation::ReLU(input));
+        let mut state = FitState::new(&graph, 1);
+        {
+            let mut values = state.get_mut_val(input);
+            for (column, value) in [-2.0, 0.0, 3.0, 5.0].into_iter().enumerate() {
+                *values.get_mut(0, column) = value;
+            }
+        }
+        let crate::graph::Node::Operation(operation) =
+            graph.traverse(Some(output)).last().unwrap().1
+        else {
+            unreachable!()
+        };
+        operation.apply(&mut state, output);
+        assert_eq!(
+            (0..4)
+                .map(|column| state.get_val(output).at(0, column))
+                .collect::<Vec<_>>(),
+            vec![0.0, 0.0, 3.0, 5.0]
+        );
+
+        state.get_mut_grad(output).fill(1.0);
+        operation.grad(&mut state, output);
+        assert_eq!(
+            (0..4)
+                .map(|column| state.get_grad(input).at(0, column))
+                .collect::<Vec<_>>(),
+            vec![0.0, 0.0, 1.0, 1.0]
+        );
+    }
+
+    #[test]
+    fn cross_entropy_forward_uses_one_hot_labels() {
+        let mut graph = Graph::default();
+        let labels = graph.add_input(crate::graph::Shape::batch_rows(3));
+        let logits = graph.add_input(crate::graph::Shape::batch_rows(3));
+        let cost = graph.add_op(crate::graph::Operation::LossCrossEntropySoftMax(
+            labels, logits,
+        ));
+        assert_eq!(graph.shape_of(cost), crate::graph::Shape::fixed(1, 1));
+
+        let mut state = FitState::new(&graph, 2);
+        {
+            let mut label_values = state.get_mut_val(labels);
+            *label_values.get_mut(0, 0) = 1.0;
+            *label_values.get_mut(0, 1) = 0.0;
+            *label_values.get_mut(0, 2) = 0.0;
+            *label_values.get_mut(1, 0) = 0.0;
+            *label_values.get_mut(1, 1) = 1.0;
+            *label_values.get_mut(1, 2) = 0.0;
+            let mut logit_values = state.get_mut_val(logits);
+            for j in 0..3 {
+                *logit_values.get_mut(0, j) = 0.0;
+            }
+            *logit_values.get_mut(1, 0) = 2.0;
+            *logit_values.get_mut(1, 1) = 1.0;
+            *logit_values.get_mut(1, 2) = 0.0;
+        }
+
+        let crate::graph::Node::Operation(operation) = graph.traverse(Some(cost)).last().unwrap().1
+        else {
+            unreachable!()
+        };
+        operation.apply(&mut state, cost);
+        let expected_loss = (3.0_f64.ln() + (2.0_f64.exp() + 1.0_f64.exp() + 1.0).ln() - 1.0) / 2.0;
+        assert!((state.get_val(cost).at(0, 0) - expected_loss).abs() < 1e-12);
     }
 }
