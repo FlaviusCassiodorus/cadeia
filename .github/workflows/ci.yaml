@@ -20,28 +20,14 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Run tests
         run: cargo test
-
-  benchmark:
-    name: Benchmarks
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Run benchmarks
-        run: cargo bench
-
-      - name: Upload benchmark report
-        uses: actions/upload-artifact@v4
-        with:
-          name: benchmark-report
-          path: target/criterion/
-          retention-days: 30
