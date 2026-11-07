@@ -9,28 +9,33 @@ use crate::matrix::{
     Element, MatrixOwned, MatrixView, MatrixViewMut, MatrixViewRead, MatrixViewWrite,
 };
 
-pub type ParamsInitializer = Box<dyn FnMut(&mut MatrixViewMut<'_, f64>)>;
+/// Scalar types supported by the engine's fitting and prediction APIs.
+pub trait FloatElement: Element + std::fmt::Display {}
+impl FloatElement for f32 {}
+impl FloatElement for f64 {}
 
-pub struct FitCfg {
+pub type ParamsInitializer<K = f64> = Box<dyn FnMut(&mut MatrixViewMut<'_, K>)>;
+
+pub struct FitCfg<K = f64> {
     pub n_epochs: u32,
     pub batch_size: u32,
-    pub params_initializer: ParamsInitializer,
-    pub learning_rate: f64,
+    pub params_initializer: ParamsInitializer<K>,
+    pub learning_rate: K,
 }
-pub struct Engine {
+pub struct Engine<K = f64> {
     graph: Graph,
     node_out: NodeId,
     node_cost: NodeId,
     verbose: u8,
-    state: Option<FitState>,
+    state: Option<FitState<K>>,
 }
 
-pub struct Data<'a> {
-    inputs: HashMap<NodeId, MatrixView<'a, f64>>,
+pub struct Data<'a, K = f64> {
+    inputs: HashMap<NodeId, MatrixView<'a, K>>,
     n: usize,
 }
-impl<'a> Data<'a> {
-    pub fn new(inputs: HashMap<NodeId, MatrixView<'a, f64>>) -> Self {
+impl<'a, K: FloatElement> Data<'a, K> {
+    pub fn new(inputs: HashMap<NodeId, MatrixView<'a, K>>) -> Self {
         let n = inputs
             .values()
             .next()
@@ -41,7 +46,7 @@ impl<'a> Data<'a> {
         );
         Self { inputs, n }
     }
-    pub fn from_input(node: NodeId, input: MatrixView<'a, f64>) -> Self {
+    pub fn from_input(node: NodeId, input: MatrixView<'a, K>) -> Self {
         let mut inputs = HashMap::new();
         inputs.insert(node, input);
         Self::new(inputs)
@@ -49,7 +54,7 @@ impl<'a> Data<'a> {
     pub fn rows(&self) -> usize {
         self.n
     }
-    pub fn slice(&self, start: usize, end: usize) -> Data<'a> {
+    pub fn slice(&self, start: usize, end: usize) -> Data<'a, K> {
         assert!(start <= end && end <= self.n, "data slice out of bounds");
         let inputs = self
             .inputs
@@ -63,19 +68,19 @@ impl<'a> Data<'a> {
     }
 }
 
-struct Storage {
-    values: Vec<MatrixOwned<f64>>,
-    grads: Vec<MatrixOwned<f64>>,
+struct Storage<K> {
+    values: Vec<MatrixOwned<K>>,
+    grads: Vec<MatrixOwned<K>>,
 }
 
-struct FitState {
-    storage: Storage,
+struct FitState<K> {
+    storage: Storage<K>,
     positions: HashMap<NodeId, usize>,
     ops: HashSet<NodeId>,
     params: Vec<bool>,
     batch_size: usize,
 }
-impl FitState {
+impl<K: FloatElement> FitState<K> {
     fn new(graph: &Graph, batch_size: usize) -> Self {
         let mut values = Vec::new();
         let mut grads = Vec::new();
@@ -104,7 +109,7 @@ impl FitState {
             batch_size,
         }
     }
-    fn params_init(&mut self, mut initializer: ParamsInitializer) {
+    fn params_init(&mut self, mut initializer: ParamsInitializer<K>) {
         for (node_id, matrix) in self.storage.values.iter_mut().enumerate() {
             if self.params[node_id] {
                 initializer(&mut matrix.as_view_mut());
@@ -131,23 +136,23 @@ fn batch_indices(n: usize, b: usize) -> impl Iterator<Item = (usize, usize)> {
         .filter_map(move |start| (start + b <= n).then_some((start, start + b)))
 }
 
-impl NodeStorage for FitState {
-    type K = f64;
-    fn get_grad(&self, node_id: NodeId) -> MatrixView<'_, f64> {
+impl<K: FloatElement> NodeStorage for FitState<K> {
+    type K = K;
+    fn get_grad(&self, node_id: NodeId) -> MatrixView<'_, K> {
         self.storage.grads[self.positions[&node_id]].as_view()
     }
-    fn get_mut_grad(&mut self, node_id: NodeId) -> MatrixViewMut<'_, f64> {
+    fn get_mut_grad(&mut self, node_id: NodeId) -> MatrixViewMut<'_, K> {
         let position = self.positions[&node_id];
         self.storage.grads[position].as_view_mut()
     }
-    fn get_val(&self, node_id: NodeId) -> MatrixView<'_, f64> {
+    fn get_val(&self, node_id: NodeId) -> MatrixView<'_, K> {
         self.storage.values[self.positions[&node_id]].as_view()
     }
-    fn get_mut_val(&mut self, node_id: NodeId) -> MatrixViewMut<'_, f64> {
+    fn get_mut_val(&mut self, node_id: NodeId) -> MatrixViewMut<'_, K> {
         let position = self.positions[&node_id];
         self.storage.values[position].as_view_mut()
     }
-    fn get_mut_val_and_grad(&mut self, node_id: NodeId) -> NodeStorageParamView<'_, f64> {
+    fn get_mut_val_and_grad(&mut self, node_id: NodeId) -> NodeStorageParamView<'_, K> {
         let position = self.positions[&node_id];
         let Storage { values, grads } = &mut self.storage;
         (values[position].as_view_mut(), grads[position].as_view())
@@ -205,7 +210,7 @@ impl NodeStorage for FitState {
     }
 }
 
-impl Engine {
+impl<K: FloatElement> Engine<K> {
     pub fn new(graph: Graph, node_out: NodeId, node_cost: NodeId, verbose: u8) -> Self {
         Self {
             graph,
@@ -215,7 +220,7 @@ impl Engine {
             state: None,
         }
     }
-    fn forward_pass(&mut self, data: &Data<'_>, out_id: NodeId) {
+    fn forward_pass(&mut self, data: &Data<'_, K>, out_id: NodeId) {
         let expected_rows = self.state.as_ref().unwrap().batch_size;
         assert_eq!(
             data.n, expected_rows,
@@ -251,7 +256,7 @@ impl Engine {
         }
     }
 
-    fn apply_grad(&mut self, learning_rate: f64) {
+    fn apply_grad(&mut self, learning_rate: K) {
         let state = self.state.as_mut().unwrap();
         for (node_id, node) in self.graph.traverse(None) {
             if matches!(node, Node::Param(_)) {
@@ -260,7 +265,7 @@ impl Engine {
             }
         }
     }
-    pub fn fit(&mut self, input: &Data<'_>, cfg: FitCfg) {
+    pub fn fit(&mut self, input: &Data<'_, K>, cfg: FitCfg<K>) {
         assert!(cfg.batch_size > 0, "batch size must be greater than zero");
         let batch_size = cfg.batch_size as usize;
         let batches_per_epoch = input.n / batch_size;
@@ -295,7 +300,9 @@ impl Engine {
                         batches_per_epoch,
                         loss
                     );
-                    io::stdout().flush().expect("failed to flush training progress");
+                    io::stdout()
+                        .flush()
+                        .expect("failed to flush training progress");
                 }
                 // Perform the barckward pass FROM the cost node -- fills gradient buffers
                 self.backward_pass(self.node_cost);
@@ -307,7 +314,7 @@ impl Engine {
             println!();
         }
     }
-    pub fn predict(&mut self, input: &Data<'_>) -> Option<MatrixView<'_, f64>> {
+    pub fn predict(&mut self, input: &Data<'_, K>) -> Option<MatrixView<'_, K>> {
         self.state.as_ref()?;
         self.state.as_mut().unwrap().clear_ops();
         let node_out = self.node_out;
@@ -409,6 +416,40 @@ mod tests {
         let actual = engine.predict(&data).expect("engine was fitted");
 
         assert!(expected.as_view().eq_matrix(&actual));
+    }
+
+    fn fit_predict_float<K: FloatElement>() {
+        let mut graph = Graph::default();
+        let input_id = graph.add_input(crate::graph::Shape::batch_rows(1));
+        let weight_id = graph.add_param(crate::graph::Shape::fixed(1, 1));
+        let prediction_id = graph.add_op(crate::graph::Operation::MatMul(input_id, weight_id));
+        let target_id = graph.add_input(crate::graph::Shape::batch_rows(1));
+        let cost_id = graph.add_op(crate::graph::Operation::LossL2(prediction_id, target_id));
+
+        let input = MatrixOwned::full(2, 1, K::from_f64(3.0));
+        let target = MatrixOwned::full(2, 1, K::from_f64(6.0));
+        let mut inputs = HashMap::new();
+        inputs.insert(input_id, input.as_view());
+        inputs.insert(target_id, target.as_view());
+        let data = Data::new(inputs);
+        let mut engine = Engine::new(graph, prediction_id, cost_id, 0);
+        engine.fit(
+            &data,
+            FitCfg {
+                n_epochs: 1,
+                batch_size: 2,
+                params_initializer: Box::new(|params| params.fill(K::one())),
+                learning_rate: K::from_f64(0.1),
+            },
+        );
+        let prediction = engine.predict(&data).expect("engine was fitted");
+        assert!((prediction.at(0, 0).to_f64() - 8.4).abs() < 1e-5);
+    }
+
+    #[test]
+    fn fit_and_predict_support_f32_and_f64() {
+        fit_predict_float::<f32>();
+        fit_predict_float::<f64>();
     }
 
     #[test]

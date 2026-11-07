@@ -165,24 +165,23 @@ fn label_at(bytes: &[u8], n_classes: usize) -> usize {
         .unwrap()
 }
 
-fn f32_le_values(bytes: &[u8]) -> impl Iterator<Item = f64> + '_ {
-    bytes.chunks_exact(4).map(|chunk| {
-        let value = f32::from_le_bytes(chunk.try_into().unwrap());
-        f64::from(value)
-    })
+fn f32_le_values(bytes: &[u8]) -> impl Iterator<Item = f32> + '_ {
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
 }
 
-fn argmax_row(values: &impl MatrixViewRead<K = f64>, row: usize) -> usize {
+fn argmax_row(values: &impl MatrixViewRead<K = f32>, row: usize) -> usize {
     (0..values.layout().cols())
         .max_by(|&lhs, &rhs| values.at(row, lhs).total_cmp(&values.at(row, rhs)))
         .unwrap()
 }
 
-fn softmax_probability(values: &impl MatrixViewRead<K = f64>, row: usize, class: usize) -> f64 {
+fn softmax_probability(values: &impl MatrixViewRead<K = f32>, row: usize, class: usize) -> f32 {
     let max_logit = (0..values.layout().cols())
         .map(|col| values.at(row, col))
-        .fold(f64::NEG_INFINITY, f64::max);
-    let exp_sum: f64 = (0..values.layout().cols())
+        .fold(f32::NEG_INFINITY, f32::max);
+    let exp_sum: f32 = (0..values.layout().cols())
         .map(|col| (values.at(row, col) - max_logit).exp())
         .sum();
     (values.at(row, class) - max_logit).exp() / exp_sum
@@ -255,10 +254,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut engine = Engine::new(model.graph, model.prediction, model.cost, 1);
     let mut rng = StdRng::seed_from_u64(7);
 
-    let imagesf64: Vec<f64> = f32_le_values(&images).collect();
-    let image_matrix = MatrixOwned::from_vec(imagesf64, count, N_INPUT);
-    let labelsf64: Vec<f64> = f32_le_values(&labels).collect();
-    let labels_matrix = MatrixOwned::from_vec(labelsf64, count, N_OUTPUT);
+    let image_matrix = MatrixOwned::from_vec(f32_le_values(&images).collect(), count, N_INPUT);
+    let labels_matrix = MatrixOwned::from_vec(f32_le_values(&labels).collect(), count, N_OUTPUT);
     drop(images);
     drop(labels);
     let mut training_inputs = HashMap::new();
@@ -277,7 +274,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 if nrows == 1 {
                     params.fill_zero();
                 } else {
-                    let aux = (6.0 / nrows as f64).sqrt();
+                    let aux = (6.0_f32 / nrows as f32).sqrt();
                     params.fill_with(|| rng.random_range(-aux..aux));
                 }
             }),
@@ -297,10 +294,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     if test_images_header.shape[0] != test_labels_header.shape[0] {
         return Err("test image and label datasets have different lengths".into());
     }
-    let test_imagesf64: Vec<f64> = f32_le_values(&test_images).collect();
-    let test_image_matrix = MatrixOwned::from_vec(test_imagesf64, test_count, N_INPUT);
-    let test_labelsf64: Vec<f64> = f32_le_values(&test_labels).collect();
-    let test_label_matrix = MatrixOwned::from_vec(test_labelsf64, test_count, N_OUTPUT);
+    let test_image_matrix =
+        MatrixOwned::from_vec(f32_le_values(&test_images).collect(), test_count, N_INPUT);
+    let test_label_matrix =
+        MatrixOwned::from_vec(f32_le_values(&test_labels).collect(), test_count, N_OUTPUT);
     let test_images_view = test_image_matrix.as_view();
     let test_labels_view = test_label_matrix.as_view();
 
