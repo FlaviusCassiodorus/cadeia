@@ -21,6 +21,7 @@ pub struct Engine {
     graph: Graph,
     node_out: NodeId,
     node_cost: NodeId,
+    verbose: u8,
     state: Option<FitState>,
 }
 
@@ -205,11 +206,12 @@ impl NodeStorage for FitState {
 }
 
 impl Engine {
-    pub fn new(graph: Graph, node_out: NodeId, node_cost: NodeId) -> Self {
+    pub fn new(graph: Graph, node_out: NodeId, node_cost: NodeId, verbose: u8) -> Self {
         Self {
             graph,
             node_out,
             node_cost,
+            verbose,
             state: None,
         }
     }
@@ -284,22 +286,24 @@ impl Engine {
                     .unwrap()
                     .get_val(self.node_cost)
                     .at(0, 0);
-                print!(
-                    "\r\x1b[2Kepoch {}/{} batch {}/{} loss {:.6}",
-                    epoch + 1,
-                    cfg.n_epochs,
-                    start / batch_size + 1,
-                    batches_per_epoch,
-                    loss
-                );
-                io::stdout().flush().expect("failed to flush training progress");
+                if self.verbose > 0 {
+                    print!(
+                        "\r\x1b[2Kepoch {}/{} batch {}/{} loss {:.6}",
+                        epoch + 1,
+                        cfg.n_epochs,
+                        start / batch_size + 1,
+                        batches_per_epoch,
+                        loss
+                    );
+                    io::stdout().flush().expect("failed to flush training progress");
+                }
                 // Perform the barckward pass FROM the cost node -- fills gradient buffers
                 self.backward_pass(self.node_cost);
                 // Change the params based on the gradients
                 self.apply_grad(cfg.learning_rate);
             }
         }
-        if cfg.n_epochs > 0 && batches_per_epoch > 0 {
+        if self.verbose > 0 && cfg.n_epochs > 0 && batches_per_epoch > 0 {
             println!();
         }
     }
@@ -329,7 +333,7 @@ mod tests {
         let mut graph = Graph::default();
         let parameter_id = graph.add_param(crate::graph::Shape::fixed(1, 2));
         let input_id = graph.add_input(crate::graph::Shape::fixed(1, 2));
-        let mut engine = Engine::new(graph, input_id, input_id);
+        let mut engine = Engine::new(graph, input_id, input_id, 0);
         engine.state = Some(FitState::new(&engine.graph, 1));
 
         let state = engine.state.as_mut().unwrap();
@@ -392,7 +396,7 @@ mod tests {
         let params_initializer: ParamsInitializer = Box::new(move |params| {
             params.assign_with(&weights.as_view(), &weights.as_view(), |value, _| value);
         });
-        let mut engine = Engine::new(graph, output_id, cost_id);
+        let mut engine = Engine::new(graph, output_id, cost_id, 0);
         engine.fit(
             &data,
             FitCfg {

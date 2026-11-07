@@ -44,7 +44,7 @@ fn make_data(feature_scale: f64) -> (MatrixOwned<f64>, MatrixOwned<f64>) {
 fn main() {
     let cfg = LassoCfg::default();
     let model = cfg.build();
-    let mut engine = Engine::new(model.graph, model.prediction, model.cost);
+    let mut engine = Engine::new(model.graph, model.prediction, model.cost, 1);
     let mut rng = StdRng::seed_from_u64(7);
 
     // The generated rule uses features 0 and 2; feature 1 is irrelevant.

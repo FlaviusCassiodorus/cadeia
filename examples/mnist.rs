@@ -252,7 +252,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         hidden_layers,
     }
     .build();
-    let mut engine = Engine::new(model.graph, model.prediction, model.cost);
+    let mut engine = Engine::new(model.graph, model.prediction, model.cost, 1);
     let mut rng = StdRng::seed_from_u64(7);
 
     let imagesf64: Vec<f64> = f32_le_values(&images).collect();
