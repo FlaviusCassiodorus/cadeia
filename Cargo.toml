@@ -10,6 +10,10 @@ criterion = "0.7"
 name = "matmul_bench"
 harness = false
 
+[[bench]]
+name = "mlp_bench"
+harness = false
+
 [dependencies]
 rand = "0.9"
 

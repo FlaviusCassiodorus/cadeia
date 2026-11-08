@@ -91,8 +91,13 @@ impl Graph {
                 let inputs = match operation {
                     Operation::MatMul(lhs, rhs)
                     | Operation::Add(lhs, rhs)
-                    | Operation::LossL2(lhs, rhs) => vec![self.shape_of(*lhs), self.shape_of(*rhs)],
-                    Operation::L1(input, _) => vec![self.shape_of(*input)],
+                    | Operation::LossL2(lhs, rhs)
+                    | Operation::LossCrossEntropySoftMax(lhs, rhs) => {
+                        vec![self.shape_of(*lhs), self.shape_of(*rhs)]
+                    }
+                    Operation::NormL1(input, _) | Operation::ReLU(input) => {
+                        vec![self.shape_of(*input)]
+                    }
                 };
                 operation.shape(&inputs)
             }

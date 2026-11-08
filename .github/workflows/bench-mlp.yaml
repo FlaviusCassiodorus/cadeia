@@ -1,20 +1,21 @@
-# Run unit tests when we have a PR
-name: Benchmarks
+name: MLP Benchmark
 
 on:
   push:
     branches:
       - master
     paths:
-      - 'src/matrix/view.rs'
-      - 'src/matrix/matmul.rs'
-      - 'benches/matmul_bench.rs'
+      - 'src/**'
+      - 'benches/mlp_bench.rs'
+
+permissions:
+  contents: read
 
 jobs:
   benchmark:
-    name: Benchmarks
+    name: MLP Benchmark
     runs-on: ubuntu-latest
-
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -22,12 +23,12 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Run benchmarks
-        run: cargo bench --bench matmul_bench
+      - name: Run MLP benchmark
+        run: cargo bench --bench mlp_bench
 
       - name: Upload benchmark report
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-report
+          name: criterion-mlp
           path: target/criterion/
           retention-days: 30
