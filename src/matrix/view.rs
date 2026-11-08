@@ -50,14 +50,13 @@ impl MatrixLayout {
         (self.rows, self.cols)
     }
 
-    /*
-    fn is_row_major(&self) -> bool {
-        self.col_stride == 1
+    pub fn is_row_major(&self) -> bool {
+        self.col_stride == 1 && self.row_stride == self.cols
     }
-    fn is_column_major(&self) -> bool {
-        self.row_stride == 1
+
+    pub fn is_column_major(&self) -> bool {
+        self.row_stride == 1 && self.col_stride == self.rows
     }
-    */
 }
 
 // Invariant ensures data is valid
