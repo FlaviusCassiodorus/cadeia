@@ -167,8 +167,10 @@ fn label_at(bytes: &[u8], n_classes: usize) -> usize {
 
 fn f32_le_values(bytes: &[u8]) -> impl Iterator<Item = f32> + '_ {
     bytes
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
 }
 
 fn argmax_row(values: &impl MatrixViewRead<K = f32>, row: usize) -> usize {
