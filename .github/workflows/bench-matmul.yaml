@@ -28,7 +28,7 @@ jobs:
         run: cargo bench --bench matmul_bench
 
       - name: Upload benchmark report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: criterion-matmul
           path: target/criterion/
