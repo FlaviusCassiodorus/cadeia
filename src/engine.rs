@@ -312,6 +312,7 @@ impl<K: FloatElement> Engine<K> {
         state.params_init(cfg.params_initializer);
         self.state = Some(state);
         for epoch in 0..cfg.n_epochs {
+            let mut epoch_loss = 0.0;
             for (start, end) in batch_indices(input.n, batch_size) {
                 // Take only the data that corresponds to this batch
                 let batch = input.slice(start, end);
@@ -326,29 +327,29 @@ impl<K: FloatElement> Engine<K> {
                 }
                 // Perform the forward pass UP TO cost node -- fills operation buffers
                 self.forward_pass(&batch, self.node_cost);
-                let loss = self
+                epoch_loss += self
                     .state
                     .as_ref()
                     .unwrap()
                     .get_val(self.node_cost)
-                    .at(0, 0);
-                if self.verbose > 0 {
-                    print!(
-                        "\r\x1b[2Kepoch {}/{} batch {}/{} loss {:.6}",
-                        epoch + 1,
-                        cfg.n_epochs,
-                        start / batch_size + 1,
-                        batches_per_epoch,
-                        loss
-                    );
-                    io::stdout()
-                        .flush()
-                        .expect("failed to flush training progress");
-                }
+                    .at(0, 0)
+                    .to_f64();
                 // Perform the barckward pass FROM the cost node -- fills gradient buffers
                 self.backward_pass(self.node_cost);
                 // Change the params based on the gradients
                 self.apply_grad(cfg.learning_rate);
+            }
+            if self.verbose > 0 && batches_per_epoch > 0 {
+                let epoch_loss = epoch_loss / batches_per_epoch as f64;
+                print!(
+                    "\r\x1b[2Kepoch {}/{} average_loss {:.6}",
+                    epoch + 1,
+                    cfg.n_epochs,
+                    epoch_loss
+                );
+                io::stdout()
+                    .flush()
+                    .expect("failed to flush training progress");
             }
         }
         if self.verbose > 0 && cfg.n_epochs > 0 && batches_per_epoch > 0 {
