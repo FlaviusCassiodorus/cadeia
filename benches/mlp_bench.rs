@@ -48,8 +48,8 @@ criterion_group!(
     name = benches;
     config = Criterion::default()
         .warm_up_time(std::time::Duration::from_secs(2))
-        .measurement_time(std::time::Duration::from_secs(5))
-        .sample_size(30);
+        .measurement_time(std::time::Duration::from_secs(10))
+        .sample_size(100);
     targets = bench_fit
 );
 criterion_main!(benches);
