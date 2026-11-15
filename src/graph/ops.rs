@@ -32,6 +32,15 @@ pub enum Operation {
 }
 
 impl Operation {
+    pub(crate) fn input_nodes(&self) -> [Option<NodeId>; MAX_OPERATION_INPUTS] {
+        use Operation::*;
+        match *self {
+            MatMul(a, b) | Add(a, b) | LossL2(a, b) | LossCrossEntropySoftMax(a, b) => {
+                [Some(a), Some(b)]
+            }
+            NormL1(a, _) | ReLU(a) => [Some(a), None],
+        }
+    }
     pub(super) fn shape(&self, inputs: &[Shape]) -> Shape {
         match *self {
             Operation::MatMul(_, _) => {
@@ -93,11 +102,14 @@ pub(crate) trait NodeStorage {
     type K: Element;
     // This function makes sense to exist given the current API
     #[allow(dead_code)]
-    fn get_grad(&self, node_id: NodeId) -> MatrixView<'_, Self::K>;
-    fn get_mut_grad(&mut self, node_id: NodeId) -> MatrixViewMut<'_, Self::K>;
+    fn get_grad(&self, node_id: NodeId) -> Option<MatrixView<'_, Self::K>>;
+    fn get_mut_grad(&mut self, node_id: NodeId) -> Option<MatrixViewMut<'_, Self::K>>;
     fn get_val(&self, node_id: NodeId) -> MatrixView<'_, Self::K>;
     fn get_mut_val(&mut self, node_id: NodeId) -> MatrixViewMut<'_, Self::K>;
-    fn get_mut_val_and_grad(&mut self, node_id: NodeId) -> NodeStorageParamView<'_, Self::K>;
+    fn get_mut_val_and_grad(
+        &mut self,
+        node_id: NodeId,
+    ) -> Option<NodeStorageParamView<'_, Self::K>>;
     fn get_val_output_and_inputs(
         &mut self,
         output: NodeId,
@@ -118,7 +130,7 @@ pub(crate) type NodeStorageValueView<'a, K> = (
     [Option<MatrixView<'a, K>>; MAX_OPERATION_INPUTS],
 );
 pub(crate) type NodeStorageGradView<'a, K> = (
-    MatrixViewMut<'a, K>,
+    Option<MatrixViewMut<'a, K>>,
     MatrixView<'a, K>,
     [Option<MatrixView<'a, K>>; MAX_OPERATION_INPUTS],
 );
@@ -130,43 +142,59 @@ impl Operation {
         S: NodeStorage,
     {
         match *self {
+            // If an input gradient is None it means it is not required so we skip it
             Operation::MatMul(a, b) => {
                 // dA = dUp @ B^T
-                let (mut grad_a, grad_up, inputs) = storage.get_grad_and_vals(a, out_id, &[b]);
-                grad_a.matmul_assign(&grad_up, &inputs[0].as_ref().unwrap().transpose());
+                let (grad_a, grad_up, inputs) = storage.get_grad_and_vals(a, out_id, &[b]);
+                if let Some(mut grad_a) = grad_a {
+                    grad_a.matmul_assign(&grad_up, &inputs[0].as_ref().unwrap().transpose());
+                }
                 // dB = A^T @ dUp
-                let (mut grad_b, grad_up, inputs) = storage.get_grad_and_vals(b, out_id, &[a]);
-                grad_b.matmul_assign(&inputs[0].as_ref().unwrap().transpose(), &grad_up);
+                let (grad_b, grad_up, inputs) = storage.get_grad_and_vals(b, out_id, &[a]);
+                if let Some(mut grad_b) = grad_b {
+                    grad_b.matmul_assign(&inputs[0].as_ref().unwrap().transpose(), &grad_up);
+                }
             }
             Operation::Add(a, b) => {
-                let (mut grad_a, grad_up, _) = storage.get_grad_and_vals(a, out_id, &[]);
-                sum_broadcast_assign(&mut grad_a, &grad_up);
-                let (mut grad_b, grad_up, _) = storage.get_grad_and_vals(b, out_id, &[]);
-                sum_broadcast_assign(&mut grad_b, &grad_up);
+                let (grad_a, grad_up, _) = storage.get_grad_and_vals(a, out_id, &[]);
+                if let Some(mut grad_a) = grad_a {
+                    sum_broadcast_assign(&mut grad_a, &grad_up);
+                }
+                let (grad_b, grad_up, _) = storage.get_grad_and_vals(b, out_id, &[]);
+                if let Some(mut grad_b) = grad_b {
+                    sum_broadcast_assign(&mut grad_b, &grad_up);
+                }
             }
             Operation::LossL2(a, b) => {
-                // dA = 2 / n * (A - B) * dUp
-                let (mut grad_a, grad_up, inputs) = storage.get_grad_and_vals(a, out_id, &[a, b]);
+                let (grad_a, grad_up, inputs) = storage.get_grad_and_vals(a, out_id, &[a, b]);
                 let a_values = inputs[0].as_ref().unwrap();
                 let b_values = inputs[1].as_ref().unwrap();
                 assert!(a_values.same_shape(b_values));
-                let scale =
-                    S::K::from_f64(2.0) / S::K::from_usize(a_values.size()) * grad_up.at(0, 0);
-                for i in 0..a_values.layout().rows() {
-                    for j in 0..a_values.layout().cols() {
-                        *grad_a.get_mut(i, j) += (a_values.at(i, j) - b_values.at(i, j)) * scale;
+
+                // dA = 2 / n * (A - B) * dUp
+                if let Some(mut grad_a) = grad_a {
+                    let scale =
+                        S::K::from_f64(2.0) / S::K::from_usize(a_values.size()) * grad_up.at(0, 0);
+                    for i in 0..a_values.layout().rows() {
+                        for j in 0..a_values.layout().cols() {
+                            *grad_a.get_mut(i, j) +=
+                                (a_values.at(i, j) - b_values.at(i, j)) * scale;
+                        }
                     }
                 }
 
                 // dB = 2 / n * (B - A) * dUp
-                let (mut grad_b, grad_up, inputs) = storage.get_grad_and_vals(b, out_id, &[a, b]);
-                let a_values = inputs[0].as_ref().unwrap();
-                let b_values = inputs[1].as_ref().unwrap();
-                let scale =
-                    S::K::from_f64(2.0) / S::K::from_usize(a_values.size()) * grad_up.at(0, 0);
-                for i in 0..b_values.layout().rows() {
-                    for j in 0..b_values.layout().cols() {
-                        *grad_b.get_mut(i, j) += (b_values.at(i, j) - a_values.at(i, j)) * scale;
+                let (grad_b, grad_up, inputs) = storage.get_grad_and_vals(b, out_id, &[a, b]);
+                if let Some(mut grad_b) = grad_b {
+                    let a_values = inputs[0].as_ref().unwrap();
+                    let b_values = inputs[1].as_ref().unwrap();
+                    let scale =
+                        S::K::from_f64(2.0) / S::K::from_usize(a_values.size()) * grad_up.at(0, 0);
+                    for i in 0..b_values.layout().rows() {
+                        for j in 0..b_values.layout().cols() {
+                            *grad_b.get_mut(i, j) +=
+                                (b_values.at(i, j) - a_values.at(i, j)) * scale;
+                        }
                     }
                 }
             }
@@ -184,46 +212,53 @@ impl Operation {
                 // since we average across rows:
                 // dL/dz_ij = (p_ij - y_ij) / n_rows * dUp
                 // We dont need dy since y is not a param and is a leaf
-                let (mut grad_z, grad_up, inputs) =
+                let (grad_z, grad_up, inputs) =
                     storage.get_grad_and_vals(logits, out_id, &[labels, logits]);
-                let y = inputs[0].as_ref().unwrap();
-                let z = inputs[1].as_ref().unwrap();
-                let nrows = y.layout().rows();
-                let scale = S::K::from_f64(1.0 / nrows as f64) * grad_up.at(0, 0);
-                for i in 0..nrows {
-                    let (max_logit, exp_sum) = softmax_row_stats(z, i);
-                    for j in 0..y.layout().cols() {
-                        let p = S::K::from_f64((z.at(i, j).to_f64() - max_logit).exp() / exp_sum);
-                        *grad_z.get_mut(i, j) += (p - y.at(i, j)) * scale;
+                if let Some(mut grad_z) = grad_z {
+                    let y = inputs[0].as_ref().unwrap();
+                    let z = inputs[1].as_ref().unwrap();
+                    let nrows = y.layout().rows();
+                    let scale = S::K::from_f64(1.0 / nrows as f64) * grad_up.at(0, 0);
+                    for i in 0..nrows {
+                        let (max_logit, exp_sum) = softmax_row_stats(z, i);
+                        for j in 0..y.layout().cols() {
+                            let p =
+                                S::K::from_f64((z.at(i, j).to_f64() - max_logit).exp() / exp_sum);
+                            *grad_z.get_mut(i, j) += (p - y.at(i, j)) * scale;
+                        }
                     }
                 }
             }
             Operation::NormL1(a, coefficient) => {
                 // dA = coefficient * sign(A) * dUp, with sign(0) = 0
-                let (mut grad_a, grad_up, inputs) = storage.get_grad_and_vals(a, out_id, &[a]);
-                let a_values = inputs[0].as_ref().unwrap();
-                let scale = S::K::from_f64(coefficient) * grad_up.at(0, 0);
-                let zero = S::K::zero();
-                for i in 0..a_values.layout().rows() {
-                    for j in 0..a_values.layout().cols() {
-                        let value = a_values.at(i, j);
-                        let sign = if value == zero {
-                            zero
-                        } else {
-                            value / value.abs()
-                        };
-                        *grad_a.get_mut(i, j) += sign * scale;
+                let (grad_a, grad_up, inputs) = storage.get_grad_and_vals(a, out_id, &[a]);
+                if let Some(mut grad_a) = grad_a {
+                    let a_values = inputs[0].as_ref().unwrap();
+                    let scale = S::K::from_f64(coefficient) * grad_up.at(0, 0);
+                    let zero = S::K::zero();
+                    for i in 0..a_values.layout().rows() {
+                        for j in 0..a_values.layout().cols() {
+                            let value = a_values.at(i, j);
+                            let sign = if value == zero {
+                                zero
+                            } else {
+                                value / value.abs()
+                            };
+                            *grad_a.get_mut(i, j) += sign * scale;
+                        }
                     }
                 }
             }
             Operation::ReLU(a) => {
-                let (mut grad_a, grad_up, inputs) = storage.get_grad_and_vals(a, out_id, &[a]);
-                let values = inputs[0].as_ref().unwrap();
-                let zero = S::K::zero();
-                for i in 0..values.layout().rows() {
-                    for j in 0..values.layout().cols() {
-                        if values.at(i, j) > zero {
-                            *grad_a.get_mut(i, j) += grad_up.at(i, j);
+                let (grad_a, grad_up, inputs) = storage.get_grad_and_vals(a, out_id, &[a]);
+                if let Some(mut grad_a) = grad_a {
+                    let values = inputs[0].as_ref().unwrap();
+                    let zero = S::K::zero();
+                    for i in 0..values.layout().rows() {
+                        for j in 0..values.layout().cols() {
+                            if values.at(i, j) > zero {
+                                *grad_a.get_mut(i, j) += grad_up.at(i, j);
+                            }
                         }
                     }
                 }

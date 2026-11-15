@@ -1,6 +1,3 @@
-use std::collections::{HashMap, HashSet};
-use std::io::{self, Write};
-
 use crate::graph::{
     Graph, Node, NodeId, NodeStorage, NodeStorageGradView, NodeStorageParamView,
     NodeStorageValueView,
@@ -8,6 +5,8 @@ use crate::graph::{
 use crate::matrix::{
     Element, MatrixOwned, MatrixView, MatrixViewMut, MatrixViewRead, MatrixViewWrite,
 };
+use std::collections::{HashMap, HashSet};
+use std::io::{self, Write};
 
 /// Scalar types supported by the engine's fitting and prediction APIs.
 pub trait FloatElement: Element + std::fmt::Display {}
@@ -70,7 +69,7 @@ impl<'a, K: FloatElement> Data<'a, K> {
 
 struct Storage<K> {
     values: Vec<MatrixOwned<K>>,
-    grads: Vec<MatrixOwned<K>>,
+    grads: Vec<Option<MatrixOwned<K>>>,
 }
 
 struct FitState<K> {
@@ -80,6 +79,7 @@ struct FitState<K> {
     params: Vec<bool>,
     batch_size: usize,
 }
+
 impl<K: FloatElement> FitState<K> {
     fn new(graph: &Graph, batch_size: usize) -> Self {
         let mut values = Vec::new();
@@ -87,19 +87,36 @@ impl<K: FloatElement> FitState<K> {
         let mut positions = HashMap::new();
         let mut ops = HashSet::new();
         let mut params = Vec::new();
+        // To record which nodes require grad as we traverse
+        let mut aux_requires_grad_nodes = HashSet::new();
         for (node_id, node) in graph.traverse(None) {
             let (rows, cols) = graph.shape_of(*node_id).rows_cols(batch_size);
             positions.insert(*node_id, values.len());
             values.push(MatrixOwned::zeros(rows, cols));
-            grads.push(MatrixOwned::zeros(rows, cols));
-            if matches!(node, Node::Operation(_)) {
-                ops.insert(*node_id);
-            }
-            if matches!(node, Node::Param(_)) {
-                params.push(true);
+            // An operation requires a gradient if at least one of the nodes that point to it does
+            // Param nodes always require gradient
+            // Input nodes never require gradient
+            let (is_param, requires_grad) = match node {
+                Node::Param(_) => (true, true),
+                Node::Operation(op) => {
+                    let requires_grad = op
+                        .input_nodes()
+                        .iter()
+                        .flatten()
+                        .any(|x| aux_requires_grad_nodes.contains(x));
+                    ops.insert(*node_id);
+                    (false, requires_grad)
+                }
+                Node::Input(_) => (false, false),
+            };
+
+            grads.push(if requires_grad {
+                aux_requires_grad_nodes.insert(*node_id);
+                Some(MatrixOwned::zeros(rows, cols))
             } else {
-                params.push(false);
-            }
+                None
+            });
+            params.push(is_param);
         }
         Self {
             storage: Storage { values, grads },
@@ -117,7 +134,7 @@ impl<K: FloatElement> FitState<K> {
         }
     }
     fn clear_grads(&mut self) {
-        for grad in self.storage.grads.iter_mut() {
+        for grad in self.storage.grads.iter_mut().flatten() {
             grad.as_view_mut().fill_zero();
         }
     }
@@ -138,12 +155,16 @@ fn batch_indices(n: usize, b: usize) -> impl Iterator<Item = (usize, usize)> {
 
 impl<K: FloatElement> NodeStorage for FitState<K> {
     type K = K;
-    fn get_grad(&self, node_id: NodeId) -> MatrixView<'_, K> {
-        self.storage.grads[self.positions[&node_id]].as_view()
+    fn get_grad(&self, node_id: NodeId) -> Option<MatrixView<'_, K>> {
+        self.storage.grads[self.positions[&node_id]]
+            .as_ref()
+            .map(MatrixOwned::as_view)
     }
-    fn get_mut_grad(&mut self, node_id: NodeId) -> MatrixViewMut<'_, K> {
+    fn get_mut_grad(&mut self, node_id: NodeId) -> Option<MatrixViewMut<'_, K>> {
         let position = self.positions[&node_id];
-        self.storage.grads[position].as_view_mut()
+        self.storage.grads[position]
+            .as_mut()
+            .map(MatrixOwned::as_view_mut)
     }
     fn get_val(&self, node_id: NodeId) -> MatrixView<'_, K> {
         self.storage.values[self.positions[&node_id]].as_view()
@@ -152,11 +173,16 @@ impl<K: FloatElement> NodeStorage for FitState<K> {
         let position = self.positions[&node_id];
         self.storage.values[position].as_view_mut()
     }
-    fn get_mut_val_and_grad(&mut self, node_id: NodeId) -> NodeStorageParamView<'_, K> {
+    fn get_mut_val_and_grad(&mut self, node_id: NodeId) -> Option<NodeStorageParamView<'_, K>> {
         let position = self.positions[&node_id];
         let Storage { values, grads } = &mut self.storage;
-        (values[position].as_view_mut(), grads[position].as_view())
+        grads[position]
+            .as_ref()
+            .map(|grad| (values[position].as_view_mut(), grad.as_view()))
     }
+    // These functions are important due to aliasing issues
+    // we have to use split_at_mut because we are updating an element of a vector
+    // based on another member
     fn get_val_output_and_inputs(
         &mut self,
         output: NodeId,
@@ -191,13 +217,18 @@ impl<K: FloatElement> NodeStorage for FitState<K> {
     ) -> NodeStorageGradView<'_, Self::K> {
         let (grad_inputs, grad_outputs) =
             self.storage.grads.split_at_mut(self.positions[&out_grad]);
+        // It is possible that an input node does not require a gradient (e.g. Loss(y, y_true))
         let grad_input = grad_inputs
             .get_mut(self.positions[&input_grad])
             .expect("gradient must be allocated")
-            .as_view_mut();
+            .as_mut()
+            .map(|x| x.as_view_mut());
+        // We call this function from the output node, so it must exist
         let grad_output = grad_outputs
             .first()
             .expect("gradient must be allocated")
+            .as_ref()
+            .expect("requesting gradient from a node that does not require gradient should be impossible")
             .as_view();
         // Inputs come from the values so there is no aliasing issue
         let inputs = std::array::from_fn(|index| {
@@ -251,7 +282,11 @@ impl<K: FloatElement> Engine<K> {
         let state = self.state.as_mut().unwrap();
         for (node_id, node) in self.graph.reverse(Some(cost_id)) {
             if let Node::Operation(op) = node {
-                op.grad(state, *node_id);
+                // We only call grad if the upstream grad exists (checking the buffer)
+                // since if it doesnt in means the nodes that point to it dont need either
+                if state.get_grad(*node_id).is_some() {
+                    op.grad(state, *node_id);
+                }
             };
         }
     }
@@ -260,7 +295,9 @@ impl<K: FloatElement> Engine<K> {
         let state = self.state.as_mut().unwrap();
         for (node_id, node) in self.graph.traverse(None) {
             if matches!(node, Node::Param(_)) {
-                let (mut parameter, gradient) = state.get_mut_val_and_grad(*node_id);
+                let (mut parameter, gradient) = state
+                    .get_mut_val_and_grad(*node_id)
+                    .expect("Parameter without a gradient should be impossible");
                 parameter.sub_assign_scaled(&gradient, learning_rate);
             }
         }
@@ -273,6 +310,7 @@ impl<K: FloatElement> Engine<K> {
         state.params_init(cfg.params_initializer);
         self.state = Some(state);
         for epoch in 0..cfg.n_epochs {
+            let mut epoch_loss = 0.0;
             for (start, end) in batch_indices(input.n, batch_size) {
                 // Take only the data that corresponds to this batch
                 let batch = input.slice(start, end);
@@ -281,33 +319,35 @@ impl<K: FloatElement> Engine<K> {
                     let state = self.state.as_mut().unwrap();
                     state.clear_ops();
                     state.clear_grads();
-                    state.get_mut_grad(self.node_cost).fill(Element::one());
+                    if let Some(mut cost_grad) = state.get_mut_grad(self.node_cost) {
+                        cost_grad.fill(Element::one());
+                    }
                 }
                 // Perform the forward pass UP TO cost node -- fills operation buffers
                 self.forward_pass(&batch, self.node_cost);
-                let loss = self
+                epoch_loss += self
                     .state
                     .as_ref()
                     .unwrap()
                     .get_val(self.node_cost)
-                    .at(0, 0);
-                if self.verbose > 0 {
-                    print!(
-                        "\r\x1b[2Kepoch {}/{} batch {}/{} loss {:.6}",
-                        epoch + 1,
-                        cfg.n_epochs,
-                        start / batch_size + 1,
-                        batches_per_epoch,
-                        loss
-                    );
-                    io::stdout()
-                        .flush()
-                        .expect("failed to flush training progress");
-                }
+                    .at(0, 0)
+                    .to_f64();
                 // Perform the barckward pass FROM the cost node -- fills gradient buffers
                 self.backward_pass(self.node_cost);
                 // Change the params based on the gradients
                 self.apply_grad(cfg.learning_rate);
+            }
+            if self.verbose > 0 && batches_per_epoch > 0 {
+                let epoch_loss = epoch_loss / batches_per_epoch as f64;
+                print!(
+                    "\r\x1b[2Kepoch {}/{} average_loss {:.6}",
+                    epoch + 1,
+                    cfg.n_epochs,
+                    epoch_loss
+                );
+                io::stdout()
+                    .flush()
+                    .expect("failed to flush training progress");
             }
         }
         if self.verbose > 0 && cfg.n_epochs > 0 && batches_per_epoch > 0 {
@@ -350,7 +390,9 @@ mod tests {
             *parameter.get_mut(0, 1) = -2.0;
         }
         {
-            let mut gradient = state.get_mut_grad(parameter_id);
+            let mut gradient = state
+                .get_mut_grad(parameter_id)
+                .expect("Parameters must have gradient");
             *gradient.get_mut(0, 0) = 0.5;
             *gradient.get_mut(0, 1) = -1.0;
         }
@@ -360,9 +402,8 @@ mod tests {
             *input.get_mut(0, 1) = 8.0;
         }
         {
-            let mut gradient = state.get_mut_grad(input_id);
-            *gradient.get_mut(0, 0) = 4.0;
-            *gradient.get_mut(0, 1) = 5.0;
+            // Inputs dont have gradients
+            assert!(state.get_mut_grad(input_id).is_none());
         }
 
         engine.apply_grad(0.1);
@@ -455,11 +496,11 @@ mod tests {
     #[test]
     fn relu_forward_and_backward_handle_zero() {
         let mut graph = Graph::default();
-        let input = graph.add_input(crate::graph::Shape::fixed(1, 4));
-        let output = graph.add_op(crate::graph::Operation::ReLU(input));
+        let param = graph.add_param(crate::graph::Shape::fixed(1, 4));
+        let output = graph.add_op(crate::graph::Operation::ReLU(param));
         let mut state = FitState::new(&graph, 1);
         {
-            let mut values = state.get_mut_val(input);
+            let mut values = state.get_mut_val(param);
             for (column, value) in [-2.0, 0.0, 3.0, 5.0].into_iter().enumerate() {
                 *values.get_mut(0, column) = value;
             }
@@ -477,11 +518,11 @@ mod tests {
             vec![0.0, 0.0, 3.0, 5.0]
         );
 
-        state.get_mut_grad(output).fill(1.0);
+        state.get_mut_grad(output).unwrap().fill(1.0);
         operation.grad(&mut state, output);
         assert_eq!(
             (0..4)
-                .map(|column| state.get_grad(input).at(0, column))
+                .map(|column| state.get_grad(param).unwrap().at(0, column))
                 .collect::<Vec<_>>(),
             vec![0.0, 0.0, 1.0, 1.0]
         );
