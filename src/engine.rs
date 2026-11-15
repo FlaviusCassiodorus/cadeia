@@ -176,11 +176,9 @@ impl<K: FloatElement> NodeStorage for FitState<K> {
     fn get_mut_val_and_grad(&mut self, node_id: NodeId) -> Option<NodeStorageParamView<'_, K>> {
         let position = self.positions[&node_id];
         let Storage { values, grads } = &mut self.storage;
-        if let Some(grad) = grads[position].as_ref() {
-            Some((values[position].as_view_mut(), grad.as_view()))
-        } else {
-            None
-        }
+        grads[position]
+            .as_ref()
+            .map(|grad| (values[position].as_view_mut(), grad.as_view()))
     }
     // These functions are important due to aliasing issues
     // we have to use split_at_mut because we are updating an element of a vector
